@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use bitcoin::Amount;
 use honggfuzz::fuzz;
 
 fn do_test(data: &[u8]) {
@@ -26,6 +27,27 @@ fn do_test(data: &[u8]) {
         Err(_) => return,
     };
     assert_eq!(amt, amt_roundtrip);
+
+    if data.len() < 3 {
+        return;
+    }
+
+    let prec = data[0] as usize % 10;
+    let width = data[1] as usize % 20;
+
+    let data_str = String::from_utf8_lossy(&data[2..]);
+    let amt = match Amount::from_str(&data_str) {
+        Ok(amt) => amt,
+        Err(_) => return,
+    };
+
+    let amt2 = amt.to_btc();
+
+    println!("Prec: {prec}");
+    println!("Width: {width}");
+    println!("str: {data_str}");
+    println!("amt2: {amt2}");
+    assert_eq!(format!("{amt:width$.prec$}"), format!("{amt2:width$.prec$} BTC"),);
 }
 
 fn main() {

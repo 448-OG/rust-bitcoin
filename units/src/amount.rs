@@ -734,6 +734,7 @@ fn fmt_satoshi_in(
     options: FormatOptions,
 ) -> fmt::Result {
     let precision = denom.precision();
+    let f_precision = options.precision.unwrap_or(0);
     // First we normalize the number:
     // {num_before_decimal_point}{:0exp}{"." if nb_decimals > 0}{:0nb_decimals}{num_after_decimal_point}{:0trailing_decimal_zeros}
     let mut num_after_decimal_point = 0;
@@ -747,7 +748,7 @@ fn fmt_satoshi_in(
             if satoshi > 0 {
                 exp = precision as usize;
             }
-            trailing_decimal_zeros = options.precision.unwrap_or(0);
+            trailing_decimal_zeros = f_precision;
         }
         Ordering::Less => {
             let precision = precision.unsigned_abs();
@@ -765,10 +766,10 @@ fn fmt_satoshi_in(
                 }
             }
             // compute requested precision
-            let opt_precision = options.precision.unwrap_or(0);
+            let opt_precision = f_precision;
             trailing_decimal_zeros = opt_precision.saturating_sub(norm_nb_decimals);
         }
-        Ordering::Equal => trailing_decimal_zeros = options.precision.unwrap_or(0),
+        Ordering::Equal => trailing_decimal_zeros = f_precision,
     }
     let total_decimals = norm_nb_decimals + trailing_decimal_zeros;
     // Compute expected width of the number
@@ -816,13 +817,22 @@ fn fmt_satoshi_in(
 
     write!(f, "{}", num_before_decimal_point)?;
 
-    repeat_char(f, '0', exp)?;
+    let precision_or_f_precision = options.precision.unwrap_or(precision.unsigned_abs() as usize);
 
+    if precision_or_f_precision.lt(&(precision.unsigned_abs() as usize)) {
+        if !f_precision.eq(&total_decimals) {
+            (0..=((total_decimals - 1) - precision_or_f_precision)).for_each(|_| {
+                num_after_decimal_point /= 10;
+            });
+        }
+        norm_nb_decimals = f_precision - trailing_decimal_zeros;
+    }
+    repeat_char(f, '0', exp)?;
     if total_decimals > 0 {
         write!(f, ".")?;
     }
     if norm_nb_decimals > 0 {
-        write!(f, "{:0width$}", num_after_decimal_point, width = norm_nb_decimals)?;
+        write!(f, "{:0width$}", num_after_decimal_point, width = norm_nb_decimals)?
     }
     repeat_char(f, '0', trailing_decimal_zeros)?;
 
@@ -1476,8 +1486,15 @@ impl fmt::Debug for SignedAmount {
 // Just using Bitcoin denominated string.
 impl fmt::Display for SignedAmount {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.fmt_value_in(f, Denomination::Bitcoin)?;
-        write!(f, " {}", Denomination::Bitcoin)
+        let satoshis = self.unsigned_abs().to_sat();
+        let denomination = Denomination::Bitcoin;
+        let mut format_options = FormatOptions::from_formatter(f);
+
+        if f.precision().is_none() && satoshis.rem_euclid(Amount::ONE_BTC.to_sat()) != 0 {
+            format_options.precision = Some(8);
+        }
+
+        fmt_satoshi_in(satoshis, self.is_negative(), f, denomination, true, format_options)
     }
 }
 
@@ -2415,10 +2432,10 @@ mod tests {
         btc_check_fmt_non_negative_6, 1, "{}", "0.00000001";
         btc_check_fmt_non_negative_7, 1, "{:2}", "0.00000001";
         btc_check_fmt_non_negative_8, 1, "{:02}", "0.00000001";
-        btc_check_fmt_non_negative_9, 1, "{:.1}", "0.00000001";
+        btc_check_fmt_non_negative_9, 1, "{:.1}", "0.0";
         btc_check_fmt_non_negative_10, 1, "{:11}", " 0.00000001";
-        btc_check_fmt_non_negative_11, 1, "{:11.1}", " 0.00000001";
-        btc_check_fmt_non_negative_12, 1, "{:011.1}", "00.00000001";
+        btc_check_fmt_non_negative_11, 1, "{:11.1}", " 0.0";
+        btc_check_fmt_non_negative_12, 1, "{:011.1}", "00.0";
         btc_check_fmt_non_negative_13, 1, "{:.9}", "0.000000010";
         btc_check_fmt_non_negative_14, 1, "{:11.9}", "0.000000010";
         btc_check_fmt_non_negative_15, 1, "{:011.9}", "0.000000010";
@@ -2433,7 +2450,7 @@ mod tests {
         btc_check_fmt_non_negative_24, 110_000_000, "{}", "1.1";
         btc_check_fmt_non_negative_25, 100_000_001, "{}", "1.00000001";
         btc_check_fmt_non_negative_26, 100_000_001, "{:1}", "1.00000001";
-        btc_check_fmt_non_negative_27, 100_000_001, "{:.1}", "1.00000001";
+        btc_check_fmt_non_negative_27, 100_000_001, "{:.1}", "1.0";
         btc_check_fmt_non_negative_28, 100_000_001, "{:10}", "1.00000001";
         btc_check_fmt_non_negative_29, 100_000_001, "{:11}", " 1.00000001";
         btc_check_fmt_non_negative_30, 100_000_001, "{:011}", "01.00000001";
@@ -2465,7 +2482,7 @@ mod tests {
 
     check_format_non_negative_show_denom! {
         Bitcoin, " BTC";
-        btc_check_fmt_non_negative_show_denom_0, 1, "{:14.1}", "0.00000001";
+        btc_check_fmt_non_negative_show_denom_0, 1, "{:14.1}", "0.0";
         btc_check_fmt_non_negative_show_denom_1, 1, "{:14.8}", "0.00000001";
         btc_check_fmt_non_negative_show_denom_2, 1, "{:15}", " 0.00000001";
         btc_check_fmt_non_negative_show_denom_3, 1, "{:015}", "00.00000001";
@@ -2940,18 +2957,60 @@ mod tests {
         assert_eq!(format!("{}", Amount::ONE_BTC), "1 BTC");
         assert_eq!(format!("{}", Amount::from_sat(1)), "0.00000001 BTC");
         assert_eq!(format!("{}", Amount::from_sat(10)), "0.00000010 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(10)), "0.0000001 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(100)), "0.000001 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(1000)), "0.00001 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(10_000)), "0.0001 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(100_000)), "0.001 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(1_000_000)), "0.01 BTC");
-        assert_eq!(format!("{:.2}", Amount::from_sat(10_000_000)), "0.10 BTC");
+        assert_eq!(format!("{:.1}", Amount::from_sat(10)), "0.0 BTC");
+        assert_eq!(format!("{:.2}", Amount::from_sat(10)), "0.00 BTC");
+        assert_eq!(format!("{:.3}", Amount::from_sat(10)), "0.000 BTC");
+        assert_eq!(format!("{:.4}", Amount::from_sat(10)), "0.0000 BTC");
+        assert_eq!(format!("{:.5}", Amount::from_sat(10)), "0.00000 BTC");
+        assert_eq!(format!("{:.6}", Amount::from_sat(10)), "0.000000 BTC");
+        assert_eq!(format!("{:.7}", Amount::from_sat(10)), "0.0000001 BTC");
+        assert_eq!(format!("{:.8}", Amount::from_sat(10)), "0.00000010 BTC");
+        assert_eq!(format!("{:.9}", Amount::from_sat(10)), "0.000000100 BTC");
+        assert_eq!(format!("{:.1}", Amount::from_sat(100_000_000)), "1.0 BTC");
         assert_eq!(format!("{:.2}", Amount::from_sat(100_000_000)), "1.00 BTC");
         assert_eq!(format!("{}", Amount::from_sat(100_000_000)), "1 BTC");
-        assert_eq!(format!("{}", Amount::from_sat(40_000_000_000)), "400 BTC");
-        assert_eq!(format!("{:.10}", Amount::from_sat(100_000_000)), "1.0000000000 BTC");
-        assert_eq!(format!("{}", Amount::from_sat(400_000_000_000_010)), "4000000.00000010 BTC");
-        assert_eq!(format!("{}", Amount::from_sat(400_000_000_000_000)), "4000000 BTC");
+        assert_eq!(format!("{}", Amount::from_sat(40_000_000_001)), "400.00000001 BTC");
+        assert_eq!(format!("{}", Amount::from_sat(40_000_000_010)), "400.00000010 BTC");
+        assert_eq!(format!("{:.7}", Amount::from_sat(40_000_000_010)), "400.0000001 BTC");
+        assert_eq!(format!("{:.1}", Amount::from_sat(40_000_000_001)), "400.0 BTC");
+        assert_eq!(format!("{}", Amount::from_btc(543.53524).unwrap()), "543.53524000 BTC");
+        assert_eq!(format!("{:.5}", Amount::from_btc(543.53524).unwrap()), "543.53524 BTC");
+        assert_eq!(
+            format!("{:.50}", Amount::from_btc(543.53524).unwrap()),
+            "543.53524000000000000000000000000000000000000000000000 BTC"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn trailing_zeros_for_signed_amount() {
+        assert_eq!(format!("{}", -SignedAmount::ONE_SAT), "-0.00000001 BTC");
+        assert_eq!(format!("{}", -SignedAmount::ONE_BTC), "-1 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_sat(-1)), "-0.00000001 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_sat(-10)), "-0.00000010 BTC");
+        assert_eq!(format!("{:.1}", SignedAmount::from_sat(-10)), "-0.0 BTC");
+        assert_eq!(format!("{:.2}", SignedAmount::from_sat(-10)), "-0.00 BTC");
+        assert_eq!(format!("{:.3}", SignedAmount::from_sat(-10)), "-0.000 BTC");
+        assert_eq!(format!("{:.4}", SignedAmount::from_sat(-10)), "-0.0000 BTC");
+        assert_eq!(format!("{:.5}", SignedAmount::from_sat(-10)), "-0.00000 BTC");
+        assert_eq!(format!("{:.6}", SignedAmount::from_sat(-10)), "-0.000000 BTC");
+        assert_eq!(format!("{:.7}", SignedAmount::from_sat(-10)), "-0.0000001 BTC");
+        assert_eq!(format!("{:.8}", SignedAmount::from_sat(-10)), "-0.00000010 BTC");
+        assert_eq!(format!("{:.9}", SignedAmount::from_sat(-10)), "-0.000000100 BTC");
+        assert_eq!(format!("{:.1}", SignedAmount::from_sat(-100_000_000)), "-1.0 BTC");
+        assert_eq!(format!("{:.2}", SignedAmount::from_sat(-100_000_000)), "-1.00 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_sat(-100_000_000)), "-1 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_sat(-40_000_000_001)), "-400.00000001 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_sat(-40_000_000_010)), "-400.00000010 BTC");
+        assert_eq!(format!("{:.7}", SignedAmount::from_sat(-40_000_000_010)), "-400.0000001 BTC");
+        assert_eq!(format!("{:.1}", SignedAmount::from_sat(-40_000_000_001)), "-400.0 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_btc(543.53524).unwrap()), "543.53524000 BTC");
+        assert_eq!(format!("{:.5}", SignedAmount::from_btc(543.53524).unwrap()), "543.53524 BTC");
+        assert_eq!(format!("{}", SignedAmount::from_btc(-543.53524).unwrap()), "-543.53524000 BTC");
+        assert_eq!(format!("{:.5}", SignedAmount::from_btc(-543.53524).unwrap()), "-543.53524 BTC");
+        assert_eq!(
+            format!("{:.50}", SignedAmount::from_btc(-543.53524).unwrap()),
+            "-543.53524000000000000000000000000000000000000000000000 BTC"
+        );
     }
 }

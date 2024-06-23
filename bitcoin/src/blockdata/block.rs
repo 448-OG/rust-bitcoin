@@ -380,7 +380,8 @@ impl Block {
         match push.map_err(|_| Bip34Error::NotPresent)? {
             script::Instruction::PushBytes(b) => {
                 // Check that the number is encoded in the minimal way.
-                let h = b.read_scriptint()
+                let h = b
+                    .read_scriptint()
                     .map_err(|_e| Bip34Error::UnexpectedPush(b.as_bytes().to_vec()))?;
                 if h < 0 {
                     Err(Bip34Error::NegativeHeight)
